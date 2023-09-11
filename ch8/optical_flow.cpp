@@ -5,8 +5,8 @@
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <chrono>
-#include <Eigen/Core>
-#include <Eigen/Dense>
+#include <eigen3/Eigen/Core>
+#include <eigen3/Eigen/Dense>
 
 using namespace std;
 using namespace cv;
@@ -85,8 +85,10 @@ void OpticalFlowMultiLevel(
  * @return the interpolated value of this pixel
  */
 
+//拿周围四个点的像素进行加权和插值，然后返回灰度
 inline float GetPixelValue(const cv::Mat &img, float x, float y) {
-    // boundary check
+    //边界检测
+	// boundary check
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x >= img.cols - 1) x = img.cols - 2;
@@ -114,6 +116,7 @@ int main(int argc, char **argv) {
     Ptr<GFTTDetector> detector = GFTTDetector::create(500, 0.01, 20); // maximum 500 keypoints
     detector->detect(img1, kp1);
 
+	//使用单层金字塔进行光流追踪，这里只用到了前一帧的特征点
     // now lets track these key points in the second image
     // first use single level LK in the validation picture
     vector<KeyPoint> kp2_single;
@@ -124,7 +127,7 @@ int main(int argc, char **argv) {
     vector<KeyPoint> kp2_multi;
     vector<bool> success_multi;
     chrono::steady_clock::time_point t1 = chrono::steady_clock::now();
-    OpticalFlowMultiLevel(img1, img2, kp1, kp2_multi, success_multi, true);
+    OpticalFlowMultiLevel(img1, img2, kp1, kp2_multi, success_multi, true);	//使用反向光流法
     chrono::steady_clock::time_point t2 = chrono::steady_clock::now();
     auto time_used = chrono::duration_cast<chrono::duration<double>>(t2 - t1);
     cout << "optical flow by gauss-newton: " << time_used.count() << endl;
@@ -186,18 +189,21 @@ void OpticalFlowSingleLevel(
     kp2.resize(kp1.size());
     success.resize(kp1.size());
     OpticalFlowTracker tracker(img1, img2, kp1, kp2, success, inverse, has_initial);
+	//并行化循环的函数
     parallel_for_(Range(0, kp1.size()),
                   std::bind(&OpticalFlowTracker::calculateOpticalFlow, &tracker, placeholders::_1));
 }
 
 void OpticalFlowTracker::calculateOpticalFlow(const Range &range) {
     // parameters
-    int half_patch_size = 4;
-    int iterations = 10;
+    int half_patch_size = 4;//查找范围9*9
+    int iterations = 10;	//迭代次数10次
     for (size_t i = range.start; i < range.end; i++) {
         auto kp = kp1[i];
         double dx = 0, dy = 0; // dx,dy need to be estimated
-        if (has_initial) {
+        // has_initial = true 时，表示 kp2 的值在上一层已经追踪出来了
+		//最顶层所有关键点刚开始迭代的时候，dx和dy为0
+		if (has_initial) {
             dx = kp2[i].pt.x - kp.pt.x;
             dy = kp2[i].pt.y - kp.pt.y;
         }
@@ -220,37 +226,43 @@ void OpticalFlowTracker::calculateOpticalFlow(const Range &range) {
 
             cost = 0;
 
+			//在一个正方形区域去进行追踪，区域大小为 half_patch_size * half_patch_size
             // compute cost and jacobian
-            for (int x = -half_patch_size; x < half_patch_size; x++)
+            for (int x = -half_patch_size; x < half_patch_size; x++) {
                 for (int y = -half_patch_size; y < half_patch_size; y++) {
-                    double error = GetPixelValue(img1, kp.pt.x + x, kp.pt.y + y) -
-                                   GetPixelValue(img2, kp.pt.x + x + dx, kp.pt.y + y + dy);;  // Jacobian
+                    //计算两张图像相同像素位置点之间的灰度差，然后添加一个下降增量dx和dy，使得error最小
+					double error = GetPixelValue(img1, kp.pt.x + x, kp.pt.y + y) -
+                                   GetPixelValue(img2, kp.pt.x + x + dx, kp.pt.y + y + dy);  //error就是f(x)
                     if (inverse == false) {
                         J = -1.0 * Eigen::Vector2d(
                             0.5 * (GetPixelValue(img2, kp.pt.x + dx + x + 1, kp.pt.y + dy + y) -
-                                   GetPixelValue(img2, kp.pt.x + dx + x - 1, kp.pt.y + dy + y)),
+                                   GetPixelValue(img2, kp.pt.x + dx + x - 1, kp.pt.y + dy + y)),	//I2对x通过差分求偏导
                             0.5 * (GetPixelValue(img2, kp.pt.x + dx + x, kp.pt.y + dy + y + 1) -
                                    GetPixelValue(img2, kp.pt.x + dx + x, kp.pt.y + dy + y - 1))
                         );
-                    } else if (iter == 0) {
+                    } 
+					//反向光流法，如果是第一次迭代，则需要计算雅可比矩阵，后面不需要
+					else if (iter == 0) {
                         // in inverse mode, J keeps same for all iterations
                         // NOTE this J does not change when dx, dy is updated, so we can store it and only compute error
                         J = -1.0 * Eigen::Vector2d(
                             0.5 * (GetPixelValue(img1, kp.pt.x + x + 1, kp.pt.y + y) -
-                                   GetPixelValue(img1, kp.pt.x + x - 1, kp.pt.y + y)),
+                                   GetPixelValue(img1, kp.pt.x + x - 1, kp.pt.y + y)),	//I1对x通过差分求偏导
                             0.5 * (GetPixelValue(img1, kp.pt.x + x, kp.pt.y + y + 1) -
                                    GetPixelValue(img1, kp.pt.x + x, kp.pt.y + y - 1))
                         );
                     }
                     // compute H, b and set cost;
-                    b += -error * J;
+                    b += -error * J;	//这里就是书上的g，(-J*f(x))
                     cost += error * error;
                     if (inverse == false || iter == 0) {
                         // also update H
                         H += J * J.transpose();
                     }
                 }
+			}
 
+			//求解 Hx=b，这里的 update 对应书上的 高斯牛顿法的 deltaX
             // compute update
             Eigen::Vector2d update = H.ldlt().solve(b);
 
@@ -261,6 +273,7 @@ void OpticalFlowTracker::calculateOpticalFlow(const Range &range) {
                 break;
             }
 
+			//第一次循环的时候，这里不会break，其实算求个初始值；若后续计算的cost > lastCost，则代表没收敛
             if (iter > 0 && cost > lastCost) {
                 break;
             }
@@ -275,13 +288,13 @@ void OpticalFlowTracker::calculateOpticalFlow(const Range &range) {
                 // converge
                 break;
             }
-        }
+        }//迭代完成
 
         success[i] = succ;
 
         // set kp2
         kp2[i].pt = kp.pt + Point2f(dx, dy);
-    }
+    }//上一帧图片的所有关键点追踪完毕
 }
 
 void OpticalFlowMultiLevel(
@@ -319,12 +332,14 @@ void OpticalFlowMultiLevel(
     cout << "build pyramid time: " << time_used.count() << endl;
 
     // coarse-to-fine LK tracking in pyramids
-    vector<KeyPoint> kp1_pyr, kp2_pyr;
-    for (auto &kp:kp1) {
+    //首先将上一帧图像的金字塔顶层的关键点作为下一帧顶层的关键点初始值，该初始值用于计算雅可比矩阵
+	vector<KeyPoint> kp1_pyr, kp2_pyr;
+    //将关键点的像素坐标缩小，已适配低分辨率
+	for (auto &kp:kp1) {	//这个循环的作用是遍历 kp1 容器中的所有元素，对于每个元素，执行循环内的操作。循环中的操作可以访问 kp 变量，这个变量代表容器中的当前元素。
         auto kp_top = kp;
-        kp_top.pt *= scales[pyramids - 1];
+        kp_top.pt *= scales[pyramids - 1];	//坐标缩小，因为分辨率降低了
         kp1_pyr.push_back(kp_top);
-        kp2_pyr.push_back(kp_top);
+        kp2_pyr.push_back(kp_top);	//假设kp2_pyr和kp1_pyr一样
     }
 
     for (int level = pyramids - 1; level >= 0; level--) {
@@ -338,7 +353,7 @@ void OpticalFlowMultiLevel(
 
         if (level > 0) {
             for (auto &kp: kp1_pyr)
-                kp.pt /= pyramid_scale;
+                kp.pt /= pyramid_scale;	//坐标放大，因为分辨率提高了
             for (auto &kp: kp2_pyr)
                 kp.pt /= pyramid_scale;
         }

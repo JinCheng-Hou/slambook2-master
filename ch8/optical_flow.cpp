@@ -273,7 +273,7 @@ void OpticalFlowTracker::calculateOpticalFlow(const Range &range) {
                 break;
             }
 
-			//第一次循环的时候，这里不会break，其实算求个初始值；若后续计算的cost > lastCost，则代表没收敛
+			//第一次循环的时候，这里不会break，其实算求个初始值；若后续计算的cost > lastCost，则代表已经到达了极值点并且越过了极值点
             if (iter > 0 && cost > lastCost) {
                 break;
             }
